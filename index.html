@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Draft &amp; Bluff — a card game of rock, paper, scissors</title>
+<title>Card RPS</title>
 <style>
 /* ============================================================
    THEME
@@ -19,6 +19,13 @@
   --win:#4ade80;
   --lose:#f87171;
   --tie:#facc15;
+
+  /* difficulty zones */
+  --easy:#3fbf6b;
+  --normal:#b59410;
+  --hard:#c9701f;
+  --perfect:#d94141;
+  --tempc:var(--normal);
 
   --rock:#c98b3f;    --rock2:#8a5a22;
   --paper:#5b8dd6;   --paper2:#2f5a94;
@@ -72,9 +79,42 @@ button:hover{background:#222b38;border-color:#3a4757;}
 button:active{transform:translateY(1px);}
 button.primary{background:var(--accent);color:#0d1117;border-color:var(--accent);font-weight:600;}
 button.primary:hover{background:#93aeff;}
-.seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden;}
-.seg button{border:0;border-radius:0;padding:7px 11px;background:transparent;color:var(--dim);}
-.seg button.on{background:var(--accent);color:#0d1117;font-weight:600;}
+/* difficulty temperature slider */
+.temp{
+  display:flex;align-items:center;gap:9px;
+  background:var(--panel);border:1px solid var(--line);
+  border-radius:8px;padding:5px 11px;
+}
+.temp label{font-size:11px;letter-spacing:1px;text-transform:uppercase;color:var(--dim);}
+.temp-label{
+  font-size:12px;font-weight:700;min-width:58px;text-align:right;
+  color:var(--tempc);transition:color .2s;
+}
+#tempSlider{
+  -webkit-appearance:none;appearance:none;
+  width:120px;height:18px;background:transparent;cursor:pointer;margin:0;
+}
+#tempSlider::-webkit-slider-runnable-track{
+  height:5px;border-radius:3px;
+  background:linear-gradient(90deg,#3fbf6b 0%,#3fbf6b 33%,#b59410 33%,#b59410 66%,#c9701f 66%,#c9701f 99%,#d94141 99%);
+}
+#tempSlider::-moz-range-track{
+  height:5px;border-radius:3px;
+  background:linear-gradient(90deg,#3fbf6b 0%,#3fbf6b 33%,#b59410 33%,#b59410 66%,#c9701f 66%,#c9701f 99%,#d94141 99%);
+}
+#tempSlider::-webkit-slider-thumb{
+  -webkit-appearance:none;appearance:none;
+  width:15px;height:15px;border-radius:50%;margin-top:-5px;
+  background:var(--tempc);border:2px solid #0d1117;
+  box-shadow:0 0 0 1px var(--tempc), 0 2px 5px rgba(0,0,0,.5);
+  transition:background .2s,box-shadow .2s;
+}
+#tempSlider::-moz-range-thumb{
+  width:15px;height:15px;border-radius:50%;
+  background:var(--tempc);border:2px solid #0d1117;
+  box-shadow:0 0 0 1px var(--tempc), 0 2px 5px rgba(0,0,0,.5);
+}
+#tempSlider:focus-visible{outline:2px solid var(--accent);outline-offset:3px;border-radius:4px;}
 
 /* ============================================================
    BOARD
@@ -208,8 +248,7 @@ kbd{background:var(--panel);border:1px solid var(--line);border-radius:4px;paddi
 
   <header>
     <div class="brand">
-      <h1>Draft &amp; Bluff</h1>
-      <p>Six cards on the table. Take turns claiming three. Then three rounds of nerve.</p>
+      <h1>Card RPS</h1>
     </div>
     <div class="controls">
       <div class="tally">
@@ -217,9 +256,11 @@ kbd{background:var(--panel);border:1px solid var(--line);border-radius:4px;paddi
         <span>D <b id="td">0</b></span>
         <span>L <b id="tl">0</b></span>
       </div>
-      <div class="seg" id="diffSeg">
-        <button data-diff="casual">Casual</button>
-        <button data-diff="perfect" class="on">Perfect</button>
+      <div class="temp">
+        <label for="tempSlider">Opponent</label>
+        <input id="tempSlider" type="range" min="0" max="100" step="1" value="50"
+               aria-describedby="tempLabel">
+        <span id="tempLabel" class="temp-label">Normal</span>
       </div>
       <button id="oddsBtn">Odds: on</button>
       <button id="newBtn" class="primary">New game</button>
@@ -450,6 +491,15 @@ function fictitiousPlay(A, iters) {
    3. AI — exact play, exact draft
    ============================================================================ */
 
+/** Draw one item from `items` with the (unnormalised) weights `w`. */
+function sample(items, w) {
+  const total = w.reduce((a, b) => a + b, 0);
+  if (!(total > 0)) return items[(Math.random() * items.length) | 0];
+  let r = Math.random() * total;
+  for (let i = 0; i < items.length; i++) { r -= w[i]; if (r <= 0) return items[i]; }
+  return items[items.length - 1];
+}
+
 const AI = (() => {
   let cards = [];                 // the 6 cards of the current game
   let playMemo = new Map();
@@ -479,7 +529,38 @@ const AI = (() => {
       value(pMask ^ (1 << i), aMask ^ (1 << j), margin + clash(cards[i], cards[j]))
     ));
     const s = solveMatrix(A);
-    return { value: s.value, row: s.row, col: s.col, pi, ai };
+    return { value: s.value, row: s.row, col: s.col, pi, ai, A };
+  }
+
+  /* --------------------------------------------------------------------
+     Opponent model. Equilibrium play is unexploitable but it never
+     *punishes* a habit, so on its own the hardest setting would not feel
+     like the hardest. This tracks one cheap tendency — whether you lead
+     with your weakest, middle or strongest card — and lets the top of the
+     dial best-respond to it. Counts survive across games in a session.
+     -------------------------------------------------------------------- */
+  let obs = [1, 1, 1];                       // Laplace prior: low / mid / high
+
+  /** Which power-rank bucket a card falls in, within the hand it was played from. */
+  function rankOf(id, handMask) {
+    const hand = bits(handMask);
+    if (hand.length < 2) return 1;
+    const sorted = hand.slice().sort((a, b) => cards[a].p - cards[b].p || a - b);
+    const k = sorted.indexOf(id);
+    if (hand.length === 3) return k;
+    return k === 0 ? 0 : 2;
+  }
+
+  /** Belief over which card the human is about to play: equilibrium, tilted by habit. */
+  function belief(pMask, nashRow, pi) {
+    const total = obs[0] + obs[1] + obs[2];
+    const flat = 1 / pi.length;
+    const raw = pi.map((id, k) => {
+      const prior = 0.7 * nashRow[k] + 0.3 * flat;   // never write a card off entirely
+      return Math.max(1e-9, prior) * (obs[rankOf(id, pMask)] / total);
+    });
+    const s = raw.reduce((a, b) => a + b, 0);
+    return raw.map(x => x / s);
   }
 
   /** Player's win probability at the end of a given draft split. */
@@ -515,32 +596,58 @@ const AI = (() => {
     value,
     solveState,
 
-    /** Which pool card the AI takes. */
-    draftPick(poolMask, pMask, aMask, order, idx, difficulty) {
+    /**
+     * Which pool card the AI takes.
+     * temp 0..1. At 1 it takes the minimax-best card; below that it samples from a
+     * softmax over the true values, so it makes plausible mistakes rather than
+     * random ones. At 0 the softmax is flat and the draft is pure chance.
+     */
+    draftPick(poolMask, pMask, aMask, order, idx, temp) {
       const options = bits(poolMask);
-      if (difficulty === "casual") {
-        // greedy: prefer high power, then a type not already held
-        return options.slice().sort((x, y) => cards[y].p - cards[x].p)[0];
+      const vals = options.map(i =>
+        draftValue(poolMask ^ (1 << i), pMask, aMask | (1 << i), order, idx + 1));
+
+      if (temp >= 1) {                       // exact: minimise the player's odds
+        let bestI = options[0], bestV = Infinity;
+        options.forEach((i, k) => { if (vals[k] < bestV - 1e-9) { bestV = vals[k]; bestI = i; } });
+        return bestI;
       }
-      let bestI = options[0], bestV = Infinity;
-      for (const i of options) {
-        const v = draftValue(poolMask ^ (1 << i), pMask, aMask | (1 << i), order, idx + 1);
-        if (v < bestV - 1e-9) { bestV = v; bestI = i; }
-      }
-      return bestI;
+      const sharp = 60 * temp * temp;        // 0 = uniform, high = near-optimal
+      const lo = Math.min(...vals);
+      const w = vals.map(v => Math.exp(-(v - lo) * sharp));
+      return sample(options, w);
     },
 
-    /** Which card the AI plays this round. */
-    playPick(pMask, aMask, margin, difficulty) {
+    /** Record a card the human played, for the opponent model. */
+    observe(id, handMask) { obs[rankOf(id, handMask)]++; },
+
+    /**
+     * Which card the AI plays this round. The dial runs through three regimes:
+     *   0 .. 0.66  coin flip  ->  exact equilibrium
+     *   0.66       exact equilibrium (unexploitable, but forgiving)
+     *   0.66 .. 1  equilibrium -> best response to the opponent model
+     */
+    playPick(pMask, aMask, margin, temp) {
       const ai = bits(aMask);
-      if (difficulty === "casual") return ai[(Math.random() * ai.length) | 0];
+      if (temp <= 0) return ai[(Math.random() * ai.length) | 0];
+
       const s = solveState(pMask, aMask, margin);
-      let r = Math.random(), acc = 0;
-      for (let k = 0; k < s.ai.length; k++) {
-        acc += s.col[k];
-        if (r <= acc) return s.ai[k];
+      const nashW = Math.min(1, temp / 0.66);
+      const flat = 1 / s.ai.length;
+      const mix = s.col.map(p => nashW * p + (1 - nashW) * flat);
+
+      const exploit = Math.max(0, (temp - 0.66) / 0.34);
+      if (exploit > 0 && s.pi.length > 1 && Math.random() < exploit * 0.85) {
+        const b = belief(pMask, s.row, s.pi);
+        let bestJ = 0, bestEV = Infinity;
+        for (let j = 0; j < s.ai.length; j++) {
+          let ev = 0;
+          for (let k = 0; k < s.pi.length; k++) ev += b[k] * s.A[k][j];
+          if (ev < bestEV - 1e-12) { bestEV = ev; bestJ = j; }
+        }
+        return s.ai[bestJ];
       }
-      return s.ai[s.ai.length - 1];
+      return sample(s.ai, mix);
     }
   };
 })();
@@ -557,6 +664,7 @@ const el = { pool: $("pool"), pHand: $("pHand"), aiHand: $("aiHand"), arena: $("
 function cardNode(card, opts = {}) {
   const d = document.createElement("div");
   d.className = "card " + TYPE_CLASS[card.t] + (opts.small ? " small" : "");
+  d.dataset.id = card.id;
   if (opts.spent) d.classList.add("spent");
   if (opts.big) d.classList.add("big");
   d.innerHTML =
@@ -575,6 +683,53 @@ function ghost(small) {
   const d = document.createElement("div");
   d.className = "card ghost" + (small ? " small" : "");
   return d;
+}
+
+/**
+ * Send a card flying from `from` to `to`. It winds up with a short hop the
+ * opposite way, then commits and travels straight there fast.
+ */
+function flyCard(card, from, to, destNode, done) {
+  if (!from || !to || !destNode || typeof destNode.animate !== "function") { done(); return; }
+
+  const node = cardNode(card);
+  Object.assign(node.style, {
+    position: "fixed",
+    left: from.left + "px", top: from.top + "px",
+    width: from.width + "px", height: from.height + "px",
+    margin: "0", zIndex: "80", pointerEvents: "none"
+  });
+  document.body.appendChild(node);
+  destNode.style.visibility = "hidden";
+
+  const dx = to.left - from.left, dy = to.top - from.top;
+  const len = Math.hypot(dx, dy) || 1;
+  const bx = -dx / len * 32, by = -dy / len * 32;   // the wind-up, opposite the travel
+  const tilt = dx >= 0 ? 8 : -8;
+
+  const anim = node.animate([
+    { transform: "translate(0,0) rotate(0deg) scale(1)",
+      easing: "cubic-bezier(.3,1.5,.6,1)" },
+    { transform: `translate(${bx}px,${by}px) rotate(${-tilt}deg) scale(1.07)`,
+      offset: 0.34, easing: "cubic-bezier(.5,0,.2,1)" },
+    { transform: `translate(${dx}px,${dy}px) rotate(0deg) scale(1)` }
+  ], { duration: 430, fill: "forwards" });
+
+  let fired = false;
+  const finish = () => {
+    if (fired) return;
+    fired = true;
+    node.remove();
+    destNode.style.visibility = "";
+    done();
+  };
+  anim.onfinish = finish;
+  setTimeout(finish, 750);                          // safety net
+}
+
+function rectOf(container, id) {
+  const n = container.querySelector('[data-id="' + id + '"]');
+  return n ? { node: n, rect: n.getBoundingClientRect() } : null;
 }
 
 function renderPips(node, results) {
@@ -596,7 +751,7 @@ const G = {
   order: [], idx: 0,
   phase: "idle",          // idle | draft | play | over
   margin: 0, results: [],
-  difficulty: "perfect",
+  temp: 0.5,              // opponent sharpness, 0..1 (the slider)
   showOdds: true,
   playerStarts: true,
   tally: { w: 0, d: 0, l: 0 },
@@ -617,7 +772,8 @@ function newGame() {
   G.busy = false;
   resetArena();
   render();
-  if (G.order[0] === "A") setTimeout(aiDraft, 550);
+  setStatus(G.order[0] === "A" ? "Opponent picks first." : "You pick first.");
+  if (G.order[0] === "A") setTimeout(aiDraft, 500);
 }
 
 function resetArena() {
@@ -678,14 +834,7 @@ function renderHand(node, mask, isPlayer) {
 }
 
 function renderOdds() {
-  if (!G.showOdds || G.phase === "idle" || G.phase === "over" || G.difficulty === "casual") {
-    el.odds.textContent = "";
-    return;
-  }
-  if (G.phase === "draft") {
-    el.odds.textContent = "";
-    return;
-  }
+  if (!G.showOdds || G.phase !== "play") { el.odds.textContent = ""; return; }
   const v = AI.value(G.pMask, G.aMask, G.margin);
   el.odds.innerHTML = `Against perfect play your odds are <b>${Math.round(v * 100)}%</b>`;
 }
@@ -698,29 +847,39 @@ function setStatus(text, cls = "") {
 /* ---- draft ---- */
 
 function playerDraft(i) {
-  if (G.phase !== "draft" || G.order[G.idx] !== "P") return;
+  if (G.phase !== "draft" || G.busy || G.order[G.idx] !== "P") return;
   takeCard(i, true);
 }
 
 function aiDraft() {
   if (G.phase !== "draft") return;
-  const i = AI.draftPick(G.poolMask, G.pMask, G.aMask, G.order, G.idx, G.difficulty);
+  const i = AI.draftPick(G.poolMask, G.pMask, G.aMask, G.order, G.idx, G.temp);
   takeCard(i, false);
 }
 
 function takeCard(i, mine) {
+  const src = rectOf(el.pool, i);
+
   G.poolMask ^= (1 << i);
   if (mine) G.pMask |= (1 << i); else G.aMask |= (1 << i);
   G.idx++;
-  if (G.idx === 6) {
-    G.phase = "play";
-    render();
-    setStatus("Draft done. You both know every card — the only secret left is the order. <span class='hl'>Pick one.</span>");
-    return;
-  }
+  G.busy = true;
   render();
-  if (G.order[G.idx] === "A") setTimeout(aiDraft, 480);
-  else setStatus("Your pick.");
+
+  const dst = rectOf(mine ? el.pHand : el.aiHand, i);
+
+  flyCard(G.cards[i], src && src.rect, dst && dst.rect, dst && dst.node, () => {
+    G.busy = false;
+    if (G.idx === 6) {
+      G.phase = "play";
+      render();
+      setStatus("Draft done. You both know every card — the only secret left is the order. <span class='hl'>Pick one.</span>");
+      return;
+    }
+    render();
+    if (G.order[G.idx] === "A") setTimeout(aiDraft, 220);
+    else setStatus("Your pick.");
+  });
 }
 
 /* ---- play ---- */
@@ -728,7 +887,8 @@ function takeCard(i, mine) {
 function playerPlay(i) {
   if (G.phase !== "play" || G.busy) return;
   G.busy = true;
-  const j = AI.playPick(G.pMask, G.aMask, G.margin, G.difficulty);
+  const j = AI.playPick(G.pMask, G.aMask, G.margin, G.temp);
+  AI.observe(i, G.pMask);
   const pc = G.cards[i], ac = G.cards[j];
 
   G.pMask ^= (1 << i);
@@ -776,13 +936,23 @@ function endGame() {
 
 $("newBtn").addEventListener("click", newGame);
 
-$("diffSeg").addEventListener("click", e => {
-  const b = e.target.closest("button");
-  if (!b) return;
-  G.difficulty = b.dataset.diff;
-  [...e.currentTarget.children].forEach(c => c.classList.toggle("on", c === b));
-  renderOdds();
-});
+/* difficulty is one continuous dial; the label names the zone you're in */
+const ZONES = [
+  { max: 33,  name: "Easy",    color: "var(--easy)" },
+  { max: 66,  name: "Normal",  color: "var(--normal)" },
+  { max: 99,  name: "Hard",    color: "var(--hard)" },
+  { max: 100, name: "Perfect", color: "var(--perfect)" }
+];
+
+function applyTemp() {
+  const raw = Number($("tempSlider").value);
+  G.temp = raw / 100;
+  const zone = ZONES.find(z => raw <= z.max);
+  $("tempLabel").textContent = zone.name;
+  document.documentElement.style.setProperty("--tempc", zone.color);
+}
+
+$("tempSlider").addEventListener("input", applyTemp);
 
 $("oddsBtn").addEventListener("click", e => {
   G.showOdds = !G.showOdds;
@@ -803,6 +973,7 @@ document.addEventListener("keydown", e => {
   }
 });
 
+applyTemp();
 render();
 newGame();
 </script>
